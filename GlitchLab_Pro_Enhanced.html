@@ -172,6 +172,11 @@ button:disabled {
   grid-column: 1 / 3;
 }
 
+#saveVideoBtn {
+  background: #00aa00;
+  grid-column: 1 / 3;
+}
+
 select {
   width: 100%;
   padding: 6px;
@@ -270,7 +275,7 @@ input[type="checkbox"] {
     grid-template-columns: 1fr;
   }
 
-  #recordBtn, #uploadBtn {
+  #recordBtn, #uploadBtn, #saveVideoBtn {
     grid-column: auto;
   }
 
@@ -311,6 +316,7 @@ input[type="checkbox"] {
   </div>
 
   <canvas id="canvas"></canvas>
+  <canvas id="effectCanvas" style="display: none;"></canvas>
   <video id="video" autoplay playsinline></video>
   <img id="uploadedImage" style="display: none;">
   <input type="file" id="uploadInput" accept="image/*,video/*">
@@ -323,16 +329,17 @@ input[type="checkbox"] {
       <div class="button-group">
         <button id="start">📷 開始</button>
         <button id="stop" disabled>⏹ 停止</button>
-        <button id="uploadBtn">📤 ファイル</button>
+        <button id="uploadBtn">📤 ��ァイル</button>
       </div>
       <div class="button-group">
-        <button id="cameraToggle" disabled>🔄 カメラ���替</button>
+        <button id="cameraToggle" disabled>🔄 カメラ切替</button>
         <button id="recordBtn" disabled>🔴 録画</button>
       </div>
       <div class="button-group">
-        <button id="save" disabled>💾 保存</button>
-        <button id="reset" style="grid-column: auto;">↺ リセット</button>
+        <button id="save" disabled>💾 画像保存</button>
+        <button id="saveVideoBtn" disabled>🎥 動画保存</button>
       </div>
+      <button id="reset" style="width: 100%;">↺ リセット</button>
     </div>
 
     <div class="section">
@@ -444,6 +451,8 @@ input[type="checkbox"] {
 <script>
 const v = document.getElementById('video');
 const c = document.getElementById('canvas');
+const effectCanvas = document.getElementById('effectCanvas');
+const effectCtx = effectCanvas.getContext('2d');
 const ctx = c.getContext('2d');
 const uploadedImg = document.getElementById('uploadedImage');
 const uploadInput = document.getElementById('uploadInput');
@@ -453,18 +462,21 @@ let isRecording = false;
 let mediaRecorder = null;
 let recordedChunks = [];
 let useFrontCamera = true;
-let currentMode = 'camera'; // 'camera' or 'upload'
+let currentMode = 'camera';
 let uploadedVideo = null;
 let uploadedVideoTime = 0;
+let recordingEffectCanvas = null;
+let recordingStream = null;
 
 function resizeCanvas() {
   c.width = window.innerWidth;
   c.height = window.innerHeight;
+  effectCanvas.width = c.width;
+  effectCanvas.height = c.height;
 }
 resizeCanvas();
 window.addEventListener('resize', resizeCanvas);
 
-// FPS計算
 let fps = 0, lastTime = Date.now(), frameCount = 0;
 setInterval(() => {
   const now = Date.now();
@@ -474,14 +486,12 @@ setInterval(() => {
   lastTime = now;
 }, 1000);
 
-// パラメータ更新時に表示を更新
 ['noise', 'noiseSize', 'rgb', 'scan', 'pixel', 'wave', 'barrel', 'ab', 'glitch', 'poster', 'saturation', 'brightness'].forEach(id => {
   document.getElementById(id).addEventListener('input', e => {
     document.getElementById(id + 'Val').textContent = parseFloat(e.target.value).toFixed(1);
   });
 });
 
-// プリセット定義
 const presets = {
   cyberpunk: { noise: 60, noiseSize: 1, rgb: 15, scan: 60, pixel: 2, wave: 15, barrel: 10, ab: 8, glitch: 15, poster: 0, saturation: 150, brightness: 110, invert: false, mirror: false },
   vhs: { noise: 80, noiseSize: 1.5, rgb: 8, scan: 80, pixel: 1, wave: 5, barrel: 0, ab: 3, glitch: 5, poster: 0, saturation: 80, brightness: 90, invert: false, mirror: false },
@@ -515,7 +525,6 @@ document.getElementById('reset').onclick = () => {
   document.getElementById('mirror').checked = false;
 };
 
-// ファイルアップロード
 document.getElementById('uploadBtn').onclick = () => uploadInput.click();
 
 uploadInput.addEventListener('change', async (e) => {
@@ -537,6 +546,7 @@ uploadInput.addEventListener('change', async (e) => {
         document.getElementById('stop').disabled = false;
         document.getElementById('cameraToggle').disabled = true;
         document.getElementById('recordBtn').disabled = true;
+        document.getElementById('saveVideoBtn').disabled = true;
         document.getElementById('status').textContent = '画像読込完了';
         
         loop();
@@ -558,7 +568,8 @@ uploadInput.addEventListener('change', async (e) => {
         document.getElementById('stop').disabled = false;
         document.getElementById('cameraToggle').disabled = true;
         document.getElementById('recordBtn').disabled = true;
-        document.getElementById('status').textContent = '動画再生中';
+        document.getElementById('saveVideoBtn').disabled = false;
+        document.getElementById('status').textContent = '動画読込完了';
         
         uploadedVideoTime = 0;
         uploadedVideo.play();
@@ -592,6 +603,7 @@ document.getElementById('start').onclick = async () => {
     document.getElementById('save').disabled = false;
     document.getElementById('recordBtn').disabled = false;
     document.getElementById('cameraToggle').disabled = false;
+    document.getElementById('saveVideoBtn').disabled = true;
     document.getElementById('status').textContent = '実行中';
 
     const options = { mimeType: 'video/webm;codecs=vp9' };
@@ -641,6 +653,7 @@ document.getElementById('stop').onclick = () => {
   document.getElementById('save').disabled = true;
   document.getElementById('recordBtn').disabled = true;
   document.getElementById('cameraToggle').disabled = true;
+  document.getElementById('saveVideoBtn').disabled = true;
   document.getElementById('mode').textContent = '📷 カメラ';
   document.getElementById('status').textContent = '停止中';
 };
@@ -670,13 +683,99 @@ document.getElementById('recordBtn').onclick = () => {
   }
 };
 
-function barrel(img, amount) {
+document.getElementById('saveVideoBtn').onclick = async () => {
+  if (!uploadedVideo) return;
+
+  document.getElementById('status').textContent = '動画処理中...';
+  document.getElementById('saveVideoBtn').disabled = true;
+
+  try {
+    const canvas = document.createElement('canvas');
+    canvas.width = uploadedVideo.videoWidth;
+    canvas.height = uploadedVideo.videoHeight;
+    const canvasCtx = canvas.getContext('2d');
+
+    const stream = canvas.captureStream(30);
+    const audio = uploadedVideo.cloneNode();
+    if (uploadedVideo.src) {
+      const videoTracks = uploadedVideo.getTracks ? uploadedVideo.getTracks() : [];
+      for (let track of videoTracks) {
+        stream.addTrack(track);
+      }
+    }
+
+    const options = { mimeType: 'video/webm;codecs=vp9' };
+    if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+      options.mimeType = 'video/webm';
+    }
+    const recorder = new MediaRecorder(stream, options);
+    const chunks = [];
+    recorder.ondataavailable = e => chunks.push(e.data);
+    recorder.onstop = () => {
+      const blob = new Blob(chunks, { type: 'video/webm' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'glitchlab-video-' + Date.now() + '.webm';
+      a.click();
+      document.getElementById('status').textContent = '動画保存完了';
+      document.getElementById('saveVideoBtn').disabled = false;
+    };
+
+    uploadedVideo.currentTime = 0;
+    uploadedVideo.play();
+    recorder.start();
+
+    const frameCount = uploadedVideo.duration * 30;
+    let frame = 0;
+
+    const processFrame = () => {
+      if (frame >= frameCount) {
+        recorder.stop();
+        return;
+      }
+
+      canvasCtx.drawImage(uploadedVideo, 0, 0);
+      let img = canvasCtx.getImageData(0, 0, canvas.width, canvas.height);
+      applyEffects(img, canvas.width, canvas.height, canvasCtx);
+      canvasCtx.putImageData(img, 0, 0);
+
+      frame++;
+      setTimeout(processFrame, 1000 / 30);
+    };
+
+    processFrame();
+  } catch (e) {
+    document.getElementById('status').textContent = 'エラー: ' + e.message;
+    console.error(e);
+    document.getElementById('saveVideoBtn').disabled = false;
+  }
+};
+
+function getEffectParams() {
+  return {
+    noise: +document.getElementById('noise').value,
+    noiseSize: +document.getElementById('noiseSize').value,
+    rgb: +document.getElementById('rgb').value,
+    scan: +document.getElementById('scan').value,
+    pixel: +document.getElementById('pixel').value,
+    wave: +document.getElementById('wave').value,
+    barrel: +document.getElementById('barrel').value,
+    ab: +document.getElementById('ab').value,
+    glitch: +document.getElementById('glitch').value,
+    poster: +document.getElementById('poster').value,
+    saturation: +document.getElementById('saturation').value / 100,
+    brightness: +document.getElementById('brightness').value / 100,
+    invert: document.getElementById('invert').checked,
+    mirror: document.getElementById('mirror').checked
+  };
+}
+
+function barrel(img, amount, w, h) {
   if (amount <= 0) return img;
-  const w = c.width, h = c.height;
   const cx = w / 2, cy = h / 2;
   const r = Math.sqrt(cx * cx + cy * cy);
   const k = amount / 100;
-  const newImg = ctx.createImageData(w, h);
+  const newImg = new ImageData(w, h);
   const d = newImg.data, oldD = img.data;
 
   for (let y = 0; y < h; y++) {
@@ -701,52 +800,20 @@ function barrel(img, amount) {
   return newImg;
 }
 
-function loop() {
-  frameCount++;
-
-  // ソースを描画
-  if (currentMode === 'camera') {
-    ctx.drawImage(v, 0, 0, c.width, c.height);
-  } else if (currentMode === 'image') {
-    ctx.clearRect(0, 0, c.width, c.height);
-    const scale = Math.max(c.width / uploadedImg.width, c.height / uploadedImg.height);
-    const x = (c.width - uploadedImg.width * scale) / 2;
-    const y = (c.height - uploadedImg.height * scale) / 2;
-    ctx.drawImage(uploadedImg, x, y, uploadedImg.width * scale, uploadedImg.height * scale);
-  } else if (currentMode === 'video' && uploadedVideo) {
-    ctx.clearRect(0, 0, c.width, c.height);
-    const scale = Math.max(c.width / uploadedVideo.videoWidth, c.height / uploadedVideo.videoHeight);
-    const x = (c.width - uploadedVideo.videoWidth * scale) / 2;
-    const y = (c.height - uploadedVideo.videoHeight * scale) / 2;
-    ctx.drawImage(uploadedVideo, x, y, uploadedVideo.videoWidth * scale, uploadedVideo.videoHeight * scale);
-  }
-
-  if (document.getElementById('mirror').checked) {
-    ctx.scale(-1, 1);
-    ctx.drawImage(c, 0, 0, -c.width, c.height);
-    ctx.scale(-1, 1);
-  }
-
-  let img = ctx.getImageData(0, 0, c.width, c.height);
+function applyEffects(img, w, h, ctxRef) {
+  const params = getEffectParams();
   let d = img.data;
 
-  const n = +document.getElementById('noise').value;
-  const ns = +document.getElementById('noiseSize').value;
-  const rgbs = +document.getElementById('rgb').value;
-  const g = +document.getElementById('glitch').value;
-  const sat = +document.getElementById('saturation').value / 100;
-  const bright = +document.getElementById('brightness').value / 100;
-  const post = +document.getElementById('poster').value;
+  const { noise, noiseSize, rgb: rgbs, glitch: g, saturation: sat, brightness: bright, poster: post, scan: sc, pixel: pix, wave: waveAmp, barrel: barrelAmount, ab: ca, invert, mirror } = params;
 
-  // ノイズ細かさを反映したノイズ適用
-  if (n > 0) {
-    const pixelSize = Math.max(1, Math.floor(ns));
-    for (let y = 0; y < c.height; y += pixelSize) {
-      for (let x = 0; x < c.width; x += pixelSize) {
-        const r = (Math.random() - 0.5) * n;
-        for (let dy = 0; dy < pixelSize && y + dy < c.height; dy++) {
-          for (let dx = 0; dx < pixelSize && x + dx < c.width; dx++) {
-            const i = ((y + dy) * c.width + (x + dx)) * 4;
+  if (noise > 0) {
+    const pixelSize = Math.max(1, Math.floor(noiseSize));
+    for (let y = 0; y < h; y += pixelSize) {
+      for (let x = 0; x < w; x += pixelSize) {
+        const r = (Math.random() - 0.5) * noise;
+        for (let dy = 0; dy < pixelSize && y + dy < h; dy++) {
+          for (let dx = 0; dx < pixelSize && x + dx < w; dx++) {
+            const i = ((y + dy) * w + (x + dx)) * 4;
             d[i] = Math.max(0, Math.min(255, d[i] + r));
             d[i + 1] = Math.max(0, Math.min(255, d[i + 1] + r));
             d[i + 2] = Math.max(0, Math.min(255, d[i + 2] + r));
@@ -756,7 +823,6 @@ function loop() {
     }
   }
 
-  // 色調整
   for (let i = 0; i < d.length; i += 4) {
     let r = d[i], g = d[i + 1], b = d[i + 2];
     let gray = (r + g + b) / 3;
@@ -767,7 +833,7 @@ function loop() {
     d[i + 1] = Math.max(0, Math.min(255, g * bright));
     d[i + 2] = Math.max(0, Math.min(255, b * bright));
 
-    if (document.getElementById('invert').checked) {
+    if (invert) {
       d[i] = 255 - d[i];
       d[i + 1] = 255 - d[i + 1];
       d[i + 2] = 255 - d[i + 2];
@@ -781,67 +847,74 @@ function loop() {
     }
   }
 
-  // RGBシフト
-  for (let y = 0; y < c.height; y++) {
+  for (let y = 0; y < h; y++) {
     let shift = Math.floor(Math.sin(y / 15) * rgbs);
-    for (let x = 0; x < c.width - Math.abs(shift) - 1; x++) {
-      let p = (y * c.width + x) * 4;
-      let q = (y * c.width + x + shift) * 4;
+    for (let x = 0; x < w - Math.abs(shift) - 1; x++) {
+      let p = (y * w + x) * 4;
+      let q = (y * w + x + shift) * 4;
       if (q < d.length - 4) {
         d[p] = d[q];
       }
     }
   }
 
-  ctx.putImageData(img, 0, 0);
-
-  // 波打ち歪み
-  let waveAmp = +document.getElementById('wave').value;
-  for (let y = 0; y < c.height; y += 2) {
-    let dx = Math.sin((y + performance.now() / 20) / 20) * waveAmp;
-    ctx.drawImage(c, 0, y, c.width, 2, dx, y, c.width, 2);
-  }
-
-  // 樽歪み
-  const barrelAmount = +document.getElementById('barrel').value;
   if (barrelAmount > 0) {
-    img = barrel(ctx.getImageData(0, 0, c.width, c.height), barrelAmount);
-    ctx.putImageData(img, 0, 0);
-  }
-
-  // モザイク
-  let pix = +document.getElementById('pixel').value;
-  if (pix > 1) {
-    let w = Math.floor(c.width / pix);
-    let h = Math.floor(c.height / pix);
-    ctx.imageSmoothingEnabled = false;
-    ctx.drawImage(c, 0, 0, c.width, c.height, 0, 0, w, h);
-    ctx.drawImage(c, 0, 0, w, h, 0, 0, c.width, c.height);
-  }
-
-  // 走査線
-  let sc = +document.getElementById('scan').value / 100;
-  if (sc > 0) {
-    ctx.fillStyle = `rgba(0,0,0,${sc})`;
-    for (let y = 0; y < c.height; y += 4) {
-      ctx.fillRect(0, y, c.width, 2);
+    const barrelImg = barrel(img, barrelAmount, w, h);
+    for (let i = 0; i < d.length; i++) {
+      d[i] = barrelImg.data[i];
     }
   }
 
-  // 色収差
-  let ca = +document.getElementById('ab').value;
-  if (ca > 0) {
-    ctx.globalCompositeOperation = 'screen';
-    ctx.drawImage(c, ca, 0);
-    ctx.globalCompositeOperation = 'source-over';
+  if (pix > 1) {
+    const tempCanvas = document.createElement('canvas');
+    tempCanvas.width = w;
+    tempCanvas.height = h;
+    const tempCtx = tempCanvas.getContext('2d');
+    tempCtx.putImageData(img, 0, 0);
+    
+    const smallW = Math.floor(w / pix);
+    const smallH = Math.floor(h / pix);
+    const smallCanvas = document.createElement('canvas');
+    smallCanvas.width = smallW;
+    smallCanvas.height = smallH;
+    const smallCtx = smallCanvas.getContext('2d');
+    smallCtx.drawImage(tempCanvas, 0, 0, w, h, 0, 0, smallW, smallH);
+    
+    ctxRef.clearRect(0, 0, w, h);
+    ctxRef.imageSmoothingEnabled = false;
+    ctxRef.drawImage(smallCanvas, 0, 0, smallW, smallH, 0, 0, w, h);
+    const pixelImg = ctxRef.getImageData(0, 0, w, h);
+    for (let i = 0; i < d.length; i++) {
+      d[i] = pixelImg.data[i];
+    }
   }
 
-  // グリッチ
-  for (let i = 0; i < g; i++) {
-    let y = Math.random() * c.height;
-    let h = 5 + Math.random() * 40;
-    ctx.drawImage(c, 0, y, c.width, h, (Math.random() - 0.5) * 60, y, c.width, h);
+  if (sc > 0) {
+    const scanAlpha = sc / 100;
+    for (let y = 0; y < h; y += 4) {
+      for (let x = 0; x < w; x++) {
+        const idx = (y * w + x) * 4;
+        d[idx] *= (1 - scanAlpha);
+        d[idx + 1] *= (1 - scanAlpha);
+        d[idx + 2] *= (1 - scanAlpha);
+      }
+    }
   }
+}
+
+function loop() {
+  frameCount++;
+  ctx.drawImage(v, 0, 0, c.width, c.height);
+
+  if (document.getElementById('mirror').checked) {
+    ctx.scale(-1, 1);
+    ctx.drawImage(c, 0, 0, -c.width, c.height);
+    ctx.scale(-1, 1);
+  }
+
+  let img = ctx.getImageData(0, 0, c.width, c.height);
+  applyEffects(img, c.width, c.height, ctx);
+  ctx.putImageData(img, 0, 0);
 
   animationId = requestAnimationFrame(loop);
 }
